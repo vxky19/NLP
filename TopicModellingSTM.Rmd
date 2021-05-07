@@ -1,0 +1,299 @@
+---
+title: "STM"
+output: hugodown::md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#install.packages("hrbrthemes")
+#install.packages("gdtools")
+#install.packages("systemfonts")
+#install.packages("data.table")
+#install.packages("topicmodels")
+#install.packages("quanteda")
+#install.packages("corpus")
+#install.packages("purrr")
+#install.packages("ggforce")
+#install.packages("stm")
+#install.packages("reshape2")
+#install.packages("bigrquery")
+#install.packages("furrr")
+#install.packages("wordcloud")
+#install.packages("textstem")
+#install.packages("ggthemes")
+
+```{r, message=F}
+library(hugodown)
+library(scales)
+library(wordcloud)
+library(textstem)
+library(bigrquery)
+library(furrr)
+library(reshape2)
+library(corpus)
+library(tm)
+library(tidyr)
+library(tidyverse)
+library(quanteda)
+library(stringi)
+library(stringr)
+library(ggplot2)
+library(stm)
+library(tidyverse)
+library(data.table)
+library(tidytext)
+library(topicmodels)
+library(purrr)
+library(ggplot2)
+library(ggforce)
+library(ggthemes)
+```
+# Data Preprocessing and Visualization
+
+## Number of Speeches per President
+
+```{r}
+
+temp = list.files(path="../Downloads/topicmodel_speeches/topicmodel_speeches/",pattern="*.txt")
+presidents <- stri_split_fixed(str=temp, pattern=" ", n=2)
+presidents <- sapply(presidents, "[[", 2) 
+presidents <- str_sub(presidents, start=1, end=-5)
+
+df <- data.frame(presidents) %>% group_by(presidents) %>% count()
+df<- df[order(df$n),]
+presidents_frequency_plot <- df %>% 
+  ggplot(aes(fct_reorder(presidents,
+                         n), 
+             n), fill=n)+
+  geom_col() +
+  coord_flip() +
+  labs(x="Frequency", title="Number of Speeches by U.S. President")
+
+presidents_frequency_plot
+```
+## Cleaning Text
+```{r}
+# 1. TOKENIZING 
+# 2. REMOVING ALL NON ALPHABETIC CHARACTERS 
+# 3. REMOVING STOP WORDS 
+# 4. LEMMATIZING
+
+all_txts <- list.files(path="../Downloads/topicmodel_speeches/topicmodel_speeches/", pattern = ".txt$")
+my_corpus <- map_dfr(all_txts, ~ tibble(txt = read_file(.x)) %>%   # read in each file in list
+                      mutate(filename = str_sub(basename(.x), start = 12, end=-5)) %>% 
+                      mutate(year = str_sub(basename(.x), 1, 4)) %>% 
+                      unnest_tokens(word, txt) %>% 
+                      filter(!str_detect(word, "^[0-9]")) %>%
+                      anti_join(stop_words, by = "word") %>%
+                      mutate(word = textstem::lemmatize_words(word))) 
+                      
+
+# 5.REMOVING CUSTOM STOP WORDS
+custom_stopwords <- data.frame(word = c("tonight","government", "people", "pre", "program","likewise","whilst","ist","percent","henceforth", "herewith","unite","country","world","nation","public","american","america","america's","congress","constitution")) 
+my_corpus <- my_corpus %>% 
+anti_join(custom_stopwords, by = "word")
+
+
+# 6. REMOVING HIDDEN NUMBERS: Seems that lemmatizing converts spelled out words to numbers but of type character. eg: eleventh becomes '11' (NOT 11).
+hidden_numbers <- as.integer(stringr::str_extract(my_corpus$word, "\\d+")) %>% na.omit() %>% as.character()
+hidden_numbers <- data.frame(word = hidden_numbers)
+my_corpus <- my_corpus %>% 
+anti_join(hidden_numbers, by = "word")
+
+# 7. REMOVING WORDS WITH LESS THAN 3 CHARACTERS
+my_corpus <- subset(my_corpus, nchar(as.character(my_corpus$word)) > 2)
+
+# 8. CUSTOM LEMMATIZING (by inspection): 
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "viet", "vietnam", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "nam", "vietnam", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "vietnamese", "vietnam", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "nam", "vietnam", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "iraqi", "iraq", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "beirut", "lebanon", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "cuban", "cuba", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "communist", "communism", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "chinese", "china", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "russia's", "russia", as.character(word)))
+my_corpus<- my_corpus %>% mutate(word = ifelse(as.character(word) == "hussein", "saddam", as.character(word)))
+
+#each president as a category
+my_corpus$filename <- as.factor(my_corpus$filename) 
+
+# most common words
+my_corpus %>% count(word ,sort=TRUE) %>% head()
+```
+
+# EXPLORATION tf-idf (which words are important)
+
+```{r}
+my_corpus %>% 
+  count(filename, word, sort=TRUE)
+```
+
+# PLOT
+
+```{r}
+my_corpus %>% 
+  count(filename, word, sort=TRUE) %>% 
+  bind_tf_idf(word, filename, n)
+```
+#
+```{r}
+
+for (i in 1:3)
+{
+my_corpus %>% 
+  count(filename, word, sort=TRUE) %>% 
+  bind_tf_idf(word, filename, n) %>% group_by(filename) %>% 
+  top_n(10) %>% 
+  ungroup %>% 
+  mutate(word = reorder(word, tf_idf)) %>% 
+  ggplot(aes(word, tf_idf, fill=filename))+
+  geom_col(show.legend=FALSE)+
+  #facet_wrap(~filename, scales="free")+ 
+  facet_wrap_paginate(~filename, nrow=4, ncol=4, scales='free', page=i)+
+  coord_flip()+
+  theme(strip.text = element_text(size=10))
+  ggsave(paste("paginate-", i, ".png", sep=""), height = 10, width = 12 , dpi = 600, path="/Users/issam/Documents/")
+}
+
+aaa <- my_corpus %>% 
+  count(filename, word, sort=TRUE) %>% 
+  bind_tf_idf(word, filename, n) %>% group_by(filename) %>% 
+  top_n(10) %>% 
+  ungroup %>% 
+  mutate(word = reorder(word, tf_idf))
+aaa %>% filter(filename=='Andrew Johnson')
+
+```
+# IMPLEMENTING TOPIC MODELING USING STM AND QUANTEDA PACKAGE
+```{r}
+my_corpus_dfm <- my_corpus %>% 
+  count(filename, word, sort=TRUE) %>% 
+  cast_dfm(filename, word, n)
+```
+# Training our model
+```{r}
+topic_mode <- stm(my_corpus_dfm, K=20, init.type="Spectral")
+```
+#TIDY GAMMA TIBBLE
+```{r}
+#x <- labelTopics(topic_mode, n = 10, frexweight = 0.5)
+#x
+presidents_gamma <- tidy(topic_mode, matrix='gamma', log=FALSE, document_names = rownames(my_corpus_dfm), topic.names = topic_labels)
+presidents_gamma
+```
+# GAMMA PLOT
+```{r}
+for (i in 1:5)
+{
+presidents_gamma %>%
+  mutate(document = reorder(document, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap_paginate(~ document,  nrow=3, ncol=3, scales='free', page=i) +
+  labs(x = "topic", y = expression(gamma))+
+    theme(strip.text = element_text(size=10))
+   ggsave(paste("gamma-matrix-", i, ".png", sep=""), height = 10, width = 12 , dpi = 600, path="/Users/issam/Documents/")
+}
+```
+# TOP WORDS FOR EACH TOPIC PLOT
+```{r}
+# which words contribute the most for each topic
+
+td_beta <- tidy(topic_mode)
+td_beta %>% 
+  group_by(topic) %>% 
+  top_n(10) %>% 
+  ungroup %>% 
+  mutate(term = reorder(term, beta)) %>% 
+  ggplot(aes(term, beta, fill=topic))+
+  geom_col(show.legend=FALSE)+
+  facet_wrap(~topic, scales="free")+ #optional: instead use facet_wrap_paginate with desired nrow, ncol for clarity.
+  coord_flip()
+```
+# TOP TOPICS BY EXPECTENCY
+```{r}
+plot(topic_mode, "summary", n=5, label='frex', main='Expected Topic Proportions With Top Five Words', topic.names=topic_labels)# distribution & top 5 words per topic
+topic_labels = c(
+  'Spanish-American War',
+  'Kansas-Nebraska Act',
+  'Watergate Scandal',
+  'American Intervention in Nicaragua',
+  'Women\'s suffrage in Utah, Coinage Legislation Act',
+  'Vietnam War',
+  'Monroe Doctrine',
+  'Bosnian Crisis, Health Care Reform',
+  'Page Law 1875',
+  'Venezuelan Crisis',
+  'US-Russia Cold War',
+  'Conservation Movement',
+  'Bank War',
+  'Iraq-Kuwait, Qaeda War',
+  'Economical Reform',
+  'Lebanese Civil War, Intermediate-Range Nuclear Forces Treaty',
+  'American Civil War',
+  'World War II',
+  'McNary-Haugen Farm Relief Act',
+  'Emancipation Proclamation'
+)
+```
+#
+```{r}
+label_map_df <- data.frame('Number'=c(1:20), 'Title'=topic_labels) 
+label_map_df
+```
+
+
+# TOPIC LABELLING
+```{r}
+plot(topic_mode, type = 'labels', topics = c(1:10), topic.names=topic_labels[1:10] ,labeltype = 'frex', main = 'FREX') 
+
+labelTopics(topic_mode, n = 10)
+topic_labels <- c('Spanish-American War','')
+```
+#TESTING WITH VARIOUS NUMBER OF TOPICS
+```{r}
+plan(multiprocess)
+many_models <- data_frame(K=c(10,20,30,40)) %>% 
+  mutate(topic_model = future_map(K, ~stm(my_corpus_dfm, K=., verbose=FALSE)))
+
+```
+#
+```{r}
+heldout <- make.heldout(my_corpus_dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, my_corpus_dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, my_corpus_dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+```
+#
+```{r}
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "Model diagnostics by number of topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 20")
+```
+
+```{r}
+
+```
+
